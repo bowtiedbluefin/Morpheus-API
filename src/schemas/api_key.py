@@ -1,6 +1,6 @@
 from typing import Optional
-from uuid import UUID
 from pydantic import BaseModel, ConfigDict
+from datetime import datetime
 
 class APIKeyCreate(BaseModel):
     """
@@ -20,10 +20,10 @@ class APIKeyDB(BaseModel):
     """
     Schema for API key in database response.
     """
-    id: UUID
+    id: int
     key_prefix: str
     name: Optional[str] = None
-    created_at: str
+    created_at: datetime
     is_active: bool
 
     # Configure Pydantic to work with SQLAlchemy

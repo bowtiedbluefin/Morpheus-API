@@ -1,23 +1,25 @@
-# Placeholder for authentication routes 
-from typing import List, Any
-from uuid import UUID
+# Authentication routes 
+from typing import List, Any, Optional
 
-from fastapi import APIRouter, HTTPException, status, Depends, Body
+from fastapi import APIRouter, HTTPException, status, Depends, Body, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.security import create_access_token, create_refresh_token
 from src.crud import user as user_crud
 from src.crud import api_key as api_key_crud
 from src.crud import private_key as private_key_crud
+from src.crud import delegation as delegation_crud
 from src.db.database import get_db
-from src.schemas.user import UserCreate, UserResponse
+from src.schemas.user import UserCreate, UserResponse, UserLogin
 from src.schemas.token import Token, TokenRefresh, TokenPayload
 from src.schemas.api_key import APIKeyCreate, APIKeyResponse, APIKeyDB
 from src.schemas import private_key as private_key_schemas
+from src.schemas import delegation as delegation_schemas
 from src.dependencies import CurrentUser
 from src.db.models import User
+from src.core.config import settings
 
-router = APIRouter()
+router = APIRouter(tags=["Auth"])
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def register_user(
@@ -42,11 +44,23 @@ async def register_user(
 
 @router.post("/login", response_model=Token)
 async def login(
-    user_in: UserCreate,
+    user_in: UserLogin,
     db: AsyncSession = Depends(get_db)
 ):
     """
     Log in a user and return JWT tokens.
+    
+    Simply provide your email and password directly in the request body:
+    
+    ```json
+    {
+        "email": "user@example.com",
+        "password": "yourpassword"
+    }
+    ```
+    
+    The response will contain an access_token that should be used in the Authorization header
+    for protected endpoints, with the format: `Bearer {access_token}`
     """
     # Authenticate user
     user = await user_crud.authenticate_user(db, user_in.email, user_in.password)
@@ -84,7 +98,6 @@ async def refresh_token(
     try:
         # Decode the refresh token
         from jose import jwt, JWTError
-        from src.core.config import settings
         
         payload = jwt.decode(
             refresh_token_in.refresh_token, 
@@ -101,7 +114,7 @@ async def refresh_token(
             raise credentials_exception
             
         # Get user from database
-        user = await user_crud.get_user_by_id(db, UUID(user_id))
+        user = await user_crud.get_user_by_id(db, int(user_id))
         if not user or not user.is_active:
             raise credentials_exception
             
@@ -126,6 +139,8 @@ async def create_api_key(
 ):
     """
     Create a new API key for the current user.
+    
+    Requires JWT Bearer authentication with the token received from the login endpoint.
     """
     # Create API key
     api_key, full_key = await api_key_crud.create_api_key(db, current_user.id, api_key_in)
@@ -143,18 +158,22 @@ async def get_api_keys(
 ):
     """
     Get all API keys for the current user.
+    
+    Requires JWT Bearer authentication with the token received from the login endpoint.
     """
     api_keys = await api_key_crud.get_user_api_keys(db, current_user.id)
     return api_keys
 
 @router.delete("/keys/{key_id}", response_model=APIKeyDB)
 async def delete_api_key(
-    key_id: UUID,
+    key_id: int,
     current_user: CurrentUser,
     db: AsyncSession = Depends(get_db)
 ):
     """
     Deactivate an API key.
+    
+    Requires JWT Bearer authentication with the token received from the login endpoint.
     """
     # Deactivate API key
     api_key = await api_key_crud.deactivate_api_key(db, key_id, current_user.id)
@@ -169,21 +188,30 @@ async def delete_api_key(
     return api_key
 
 # Private key management endpoints
-@router.post("/private-key", status_code=status.HTTP_201_CREATED)
+@router.post("/private-key", status_code=status.HTTP_201_CREATED, response_model=dict)
 async def store_private_key(
-    private_key: private_key_schemas.PrivateKeyCreate,
+    request_body: dict = Body(...),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(CurrentUser)
-) -> Any:
+):
     """
     Store an encrypted blockchain private key for the authenticated user.
     Replaces any existing key.
     """
+    # Validate request body manually
+    if "private_key" not in request_body:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Private key is required"
+        )
+    
+    private_key = request_body["private_key"]
+    
     try:
         await private_key_crud.create_user_private_key(
             db=db, 
             user_id=current_user.id, 
-            private_key=private_key.private_key
+            private_key=private_key
         )
         return {"message": "Private key stored successfully"}
     except Exception as e:
@@ -193,44 +221,111 @@ async def store_private_key(
             detail="Failed to store private key"
         )
 
-
-@router.get("/private-key/status", response_model=private_key_schemas.PrivateKeyStatus)
+@router.get("/private-key", response_model=private_key_schemas.PrivateKeyStatus)
 async def get_private_key_status(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(CurrentUser)
-) -> Any:
+):
     """
-    Check if a private key is registered for the authenticated user.
+    Check if a user has a private key registered.
+    Does not return the actual key, only status information.
     """
-    stored_key = await private_key_crud.get_user_private_key(db, current_user.id)
-    
-    if not stored_key:
-        return private_key_schemas.PrivateKeyStatus(has_key=False)
-    
-    return private_key_schemas.PrivateKeyStatus(
-        has_key=True,
-        created_at=stored_key.created_at,
-        updated_at=stored_key.updated_at
-    )
+    has_key = await private_key_crud.user_has_private_key(db, current_user.id)
+    return {"has_private_key": has_key}
 
-
-@router.delete("/private-key", status_code=status.HTTP_200_OK)
+@router.delete("/private-key", status_code=status.HTTP_200_OK, response_model=dict)
 async def delete_private_key(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(CurrentUser)
-) -> Any:
+):
     """
-    Delete the stored private key for the authenticated user.
+    Delete a user's private key.
     """
-    deleted = await private_key_crud.delete_user_private_key(db, current_user.id)
-    
-    if not deleted:
+    has_key = await private_key_crud.user_has_private_key(db, current_user.id)
+    if not has_key:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="No private key found for this user"
+            detail="Private key not found"
+        )
+    
+    success = await private_key_crud.delete_user_private_key(db, current_user.id)
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete private key"
         )
     
     return {"message": "Private key deleted successfully"}
+
+# --- Delegation Endpoints --- 
+@router.post("/delegation", response_model=delegation_schemas.DelegationRead)
+async def store_delegation(
+    delegation_in: delegation_schemas.DelegationCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(CurrentUser)
+):
+    """
+    Allows an authenticated user to store a signed delegation.
+    The frontend should construct and sign the delegation using the Gator SDK.
+    """
+    if delegation_in.delegate_address != settings.GATEWAY_DELEGATE_ADDRESS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Delegation must be granted to the configured gateway address: {settings.GATEWAY_DELEGATE_ADDRESS}"
+        )
+
+    existing_active = await delegation_crud.get_active_delegation_by_user(db, user_id=current_user.id)
+    if existing_active:
+        await delegation_crud.set_delegation_inactive(db, db_delegation=existing_active)
+
+    db_delegation = await delegation_crud.create_user_delegation(
+        db=db, delegation=delegation_in, user_id=current_user.id
+    )
+    return db_delegation
+
+@router.get("/delegation", response_model=List[delegation_schemas.DelegationRead])
+async def get_user_delegations(
+    skip: int = 0,
+    limit: int = 10,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(CurrentUser)
+):
+    """
+    Retrieves the user's stored delegations.
+    """
+    delegations = await delegation_crud.get_delegations_by_user(db, user_id=current_user.id, skip=skip, limit=limit)
+    return delegations
+
+@router.get("/delegation/active", response_model=Optional[delegation_schemas.DelegationRead])
+async def get_active_user_delegation(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(CurrentUser)
+):
+    """
+    Retrieves the user's currently active delegation, if any.
+    """
+    delegation = await delegation_crud.get_active_delegation_by_user(db, user_id=current_user.id)
+    return delegation
+
+@router.delete("/delegation/{delegation_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_delegation(
+    delegation_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(CurrentUser)
+):
+    """
+    Deletes a specific delegation for the user.
+    Alternatively, could just mark it inactive.
+    """
+    db_delegation = await delegation_crud.get_delegation(db, delegation_id=delegation_id)
+    if not db_delegation or db_delegation.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Delegation not found")
+
+    # Using hard delete for now
+    await delegation_crud.delete_delegation(db, db_delegation=db_delegation)
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+# --- End Delegation Endpoints ---
 
 # Export router
 auth_router = router 

@@ -55,18 +55,19 @@ class ChatMessage(BaseModel):
 
 class ChatCompletionRequest(BaseModel):
     """OpenAI chat completion request schema"""
-    model: str
+    model: Optional[str] = None
     messages: List[ChatMessage]
     temperature: Optional[float] = 1.0
     top_p: Optional[float] = 1.0
     n: Optional[int] = 1
-    stream: Optional[bool] = False
+    stream: Optional[bool] = True
     stop: Optional[Union[str, List[str]]] = None
     max_tokens: Optional[int] = None
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
+    session_id: Optional[str] = None
 
 
 class ChatCompletionChoice(BaseModel):

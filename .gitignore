@@ -1,49 +1,65 @@
-# Python bytecode
-__pycache__/
-*.py[cod]
-*$py.class
-
-# Virtual environments
-venv/
-env/
-ENV/
-.env
-
-# Distribution / packaging
-dist/
-build/
-*.egg-info/
-
-# Local development settings
+# Environment variables
 .env
 .env.*
 !.env.example
 
-# Testing
-.coverage
-htmlcov/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
+# Morpheus specific
+Morpheus-Lumerin-Node/
+server.log
+transferring
 
-# IDE specific files
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+pytest.ini
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+
+# Virtual Environment
+venv/
+ENV/
+.venv/
+env/
+
+# IDE
 .idea/
 .vscode/
 *.swp
 *.swo
+
+# OS specific
 .DS_Store
+Thumbs.db
 
 # Logs
 logs/
 *.log
+debug_log.txt
 
-# Build artifacts
-node_modules/
-
-# Database
-*.db
-*.sqlite3
-
-# Docker volumes
-postgres_data/
-redis_data/ 
+# Local configuration
+config.local.json 
