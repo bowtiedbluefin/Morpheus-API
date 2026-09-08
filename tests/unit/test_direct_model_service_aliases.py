@@ -6,6 +6,7 @@ from src.core.direct_model_service import (
     DirectModelService,
     _alias_candidates,
     catalog_name_slug,
+    companion_bids_url,
     suggest_near_miss_models,
 )
 
@@ -56,6 +57,20 @@ class TestAliasCandidates:
     def test_no_alias_when_name_already_kebab(self):
         aliases = _alias_candidates("llama-3.2-3b", {"veniceId": "llama-3.2-3b"})
         assert aliases == set()
+
+    def test_file_aliases_from_gateway(self):
+        aliases = _alias_candidates("glm-5.2", None, ["glm-5-2", "GLM 5.2"])
+        assert aliases == {"glm-5-2", "glm 5.2"}
+
+
+def test_companion_bids_url():
+    assert companion_bids_url("https://active.mor.org/active_models.json") == (
+        "https://active.mor.org/active_bids.json"
+    )
+    assert companion_bids_url("https://active.mor.org/gateway_models.json") == (
+        "https://active.mor.org/gateway_bids.json"
+    )
+    assert companion_bids_url("https://example.com/other.json") == ""
 
 
 @pytest.mark.asyncio
@@ -169,3 +184,51 @@ def test_suggest_near_miss_strips_turbo_suffix():
         mapping,
     )
     assert suggestions == ["qwen3-coder-480b-a35b-instruct"]
+
+
+@pytest.mark.asyncio
+async def test_resolves_gateway_file_aliases():
+    svc = _svc_with_models(
+        [
+            {
+                "Name": "glm-5.2",
+                "Id": GLM_ID,
+                "ModelType": "LLM",
+                "aliases": ["glm-5-2", "GLM 5.2"],
+            },
+        ]
+    )
+    assert await svc.resolve_model_id("glm-5.2") == GLM_ID
+    assert await svc.resolve_model_id("glm-5-2") == GLM_ID
+    assert await svc.resolve_model_id("GLM 5.2") == GLM_ID
+
+
+@pytest.mark.asyncio
+async def test_healthy_bid_ids_prefer_bids_file():
+    svc = _svc_with_models(
+        [
+            {
+                "Name": "glm-5.2",
+                "Id": GLM_ID,
+                "ModelType": "LLM",
+                "bidDetail": [{"bidId": "0x" + "aa" * 32, "status": "healthy"}],
+            },
+        ]
+    )
+    file_healthy = "0x" + "bb" * 32
+    svc._update_bids_cache(
+        [
+            {
+                "Id": file_healthy,
+                "ModelAgentId": GLM_ID,
+                "health": {"status": "healthy"},
+            },
+            {
+                "Id": "0x" + "cc" * 32,
+                "ModelAgentId": GLM_ID,
+                "health": {"status": "degraded"},
+            },
+        ]
+    )
+    ids = await svc.get_healthy_bid_ids_for_model(GLM_ID)
+    assert ids == {file_healthy}
