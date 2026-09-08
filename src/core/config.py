@@ -336,6 +336,9 @@ class Settings(BaseSettings):
 
     # Direct Model Fetching Settings (replaces model sync)
     ACTIVE_MODELS_URL: str = Field(default=os.getenv("ACTIVE_MODELS_URL", "https://active.dev.mor.org/active_models.json"))
+    # Optional explicit bids file. When empty, derive sibling "*_bids.json"
+    # from ACTIVE_MODELS_URL (active_models.json → active_bids.json, same for gateway_).
+    ACTIVE_BIDS_URL: str = Field(default=os.getenv("ACTIVE_BIDS_URL", ""))
     DEFAULT_FALLBACK_MODEL: str = Field(default=os.getenv("DEFAULT_FALLBACK_MODEL", "mistral-31-24b"))
     DEFAULT_FALLBACK_EMBEDDINGS_MODEL: str = Field(default=os.getenv("DEFAULT_FALLBACK_EMBEDDINGS_MODEL", "text-embedding-bge-m3"))
     DEFAULT_FALLBACK_TTS_MODEL: str = Field(default=os.getenv("DEFAULT_FALLBACK_TTS_MODEL", "tts-kokoro"))
