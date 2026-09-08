@@ -39,7 +39,19 @@ def catalog_name_slug(name: str) -> str:
     return s.strip("-")
 
 
-def _alias_candidates(model_name: str, enrichment: Optional[dict]) -> Set[str]:
+def companion_bids_url(models_url: str) -> str:
+    """active_models.json → active_bids.json; gateway_models.json → gateway_bids.json."""
+    u = (models_url or "").strip()
+    if u.endswith("models.json"):
+        return u[: -len("models.json")] + "bids.json"
+    return ""
+
+
+def _alias_candidates(
+    model_name: str,
+    enrichment: Optional[dict],
+    file_aliases: Optional[List] = None,
+) -> Set[str]:
     """Extra lowercase resolve keys for a catalog model (excluding the name itself)."""
     aliases: Set[str] = set()
     name_key = model_name.lower()
@@ -53,6 +65,13 @@ def _alias_candidates(model_name: str, enrichment: Optional[dict]) -> Set[str]:
         vid = venice_id.strip().lower()
         if vid and vid != name_key:
             aliases.add(vid)
+
+    for raw in file_aliases or []:
+        if not isinstance(raw, str):
+            continue
+        a = raw.strip().lower()
+        if a and a != name_key:
+            aliases.add(a)
 
     return aliases
 
@@ -148,6 +167,8 @@ class DirectModelService:
         self._last_etag: Optional[str] = None
         self._last_hash: Optional[str] = None
         self._raw_models_data: List[Dict] = []
+        self._bids_loaded = False
+        self._healthy_bid_ids_by_model: Dict[str, Set[str]] = {}
         
         logger.info("DirectModelService initialized",
                    cache_duration_seconds=cache_duration_seconds,
@@ -200,7 +221,9 @@ class DirectModelService:
         already excluded (stale proxy-router, unreachable endpoint, etc.).
         Rated/on-chain bid lists can still contain those ghost bids.
 
-        Returns lowercase ``0x…`` bid IDs with ``bidDetail[].status == "healthy"``.
+        Returns lowercase ``0x…`` bid IDs with ``health.status == "healthy"``
+        from the companion ``*_bids.json`` when that file loaded. Otherwise
+        falls back to ``bidDetail[].status == "healthy"`` on the models file.
         Empty when the model is missing or has no healthy bids — callers must
         not fall back to unfiltered rated bids.
         """
@@ -208,6 +231,9 @@ class DirectModelService:
         want = (model_id or "").strip().lower()
         if not want:
             return set()
+
+        if self._bids_loaded:
+            return set(self._healthy_bid_ids_by_model.get(want) or [])
 
         for model in self._raw_models_data:
             if not isinstance(model, dict):
@@ -323,6 +349,7 @@ class DirectModelService:
                 if response.status_code == 304:
                     logger.info("Models data unchanged (304 Not Modified), extending cache")
                     self._extend_cache()
+                    await self._refresh_bids_cache(client)
                     return
                 
                 response.raise_for_status()
@@ -335,6 +362,7 @@ class DirectModelService:
                 if current_hash == self._last_hash:
                     logger.info("Models data unchanged (same hash), extending cache")
                     self._extend_cache()
+                    await self._refresh_bids_cache(client)
                     return
                 
                 # Parse new data
@@ -343,6 +371,7 @@ class DirectModelService:
                 
                 # Update cache
                 self._update_cache(models, current_hash, response.headers.get('ETag'))
+                await self._refresh_bids_cache(client)
                 
                 logger.info(f"✅ Successfully refreshed {len(models)} models")
                 
@@ -361,6 +390,55 @@ class DirectModelService:
             else:
                 raise
     
+    async def _refresh_bids_cache(self, client: httpx.AsyncClient):
+        """Load companion *_bids.json. Fail-open to model bidDetail."""
+        url = (getattr(settings, "ACTIVE_BIDS_URL", "") or "").strip() or companion_bids_url(
+            settings.ACTIVE_MODELS_URL
+        )
+        if not url:
+            if not self._bids_loaded:
+                self._healthy_bid_ids_by_model = {}
+            return
+        try:
+            response = await client.get(url, timeout=10.0)
+            response.raise_for_status()
+            data = response.json()
+            bids = data.get("bids", []) if isinstance(data, dict) else []
+            if not isinstance(bids, list):
+                bids = []
+            self._update_bids_cache(bids)
+            logger.info(
+                "Refreshed bids catalog",
+                bids=len(bids),
+                source_url=url,
+                event_type="external_bids_fetch",
+            )
+        except Exception as e:
+            logger.warning(
+                "Bids catalog fetch failed open; using model bidDetail",
+                error=str(e),
+                source_url=url,
+                event_type="external_bids_fetch_error",
+            )
+            if not self._bids_loaded:
+                self._healthy_bid_ids_by_model = {}
+
+    def _update_bids_cache(self, bids: List[Dict]):
+        by_model: Dict[str, Set[str]] = defaultdict(set)
+        for bid in bids:
+            if not isinstance(bid, dict):
+                continue
+            health = bid.get("health") if isinstance(bid.get("health"), dict) else {}
+            if str(health.get("status") or "").strip().lower() != "healthy":
+                continue
+            mid = str(bid.get("ModelAgentId") or bid.get("modelId") or "").strip().lower()
+            bid_id = str(bid.get("Id") or bid.get("bidId") or "").strip().lower()
+            if not mid or not (bid_id.startswith("0x") and len(bid_id) >= 10):
+                continue
+            by_model[mid].add(bid_id)
+        self._healthy_bid_ids_by_model = dict(by_model)
+        self._bids_loaded = True
+
     def _update_cache(self, models: List[Dict], content_hash: str, etag: Optional[str]):
         """Update the internal cache with new model data.
 
@@ -393,7 +471,11 @@ class DirectModelService:
             new_mapping_type[name_key] = model_type
             new_blockchain_ids.add(blockchain_id)
 
-            for alias in _alias_candidates(model_name, model.get("enrichment")):
+            for alias in _alias_candidates(
+                model_name,
+                model.get("enrichment"),
+                model.get("aliases"),
+            ):
                 if alias in new_mapping:
                     # Catalog name (or earlier authoritative key) wins — never override.
                     continue
